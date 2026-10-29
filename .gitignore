@@ -56,3 +56,5 @@ LegacyMacReceiver/.build/
 Sources/BetterCastReceiverAndroid/local.properties.bak
 appcast.xml
 updater-test-A/
+
+/local-build/
