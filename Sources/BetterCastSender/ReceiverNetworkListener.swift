@@ -37,7 +37,11 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private var reconnectAttempts = 0
     private static let maxReconnectAttempts = 15
 
-    init() {}
+    private let preferredTCPPort: UInt16
+
+    init(tcpPort: UInt16 = BCConstants.tcpPort) {
+        preferredTCPPort = tcpPort
+    }
 
     func setup(decoder: ReceiverVideoDecoder, renderer: ReceiverVideoRenderer) {
         self.videoDecoder = decoder
@@ -81,6 +85,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             connection.cancel()
         }
         connectedClients.removeAll()
+        videoRenderer?.flush()
     }
 
     // MARK: - ADB
@@ -267,6 +272,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
         tcpOptions.noDelay = true
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.serviceClass = .interactiveVideo
@@ -295,7 +303,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
             self.networkQueue.async {
                 for connection in self.connectedClients {
-                    connection.send(content: packet, completion: .contentProcessed({ _ in }))
+                    connection.send(content: packet, completion: .contentProcessed({ error in
+                        if error != nil { connection.cancel() }
+                    }))
                 }
             }
         }
@@ -309,6 +319,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private func startTCP() {
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
         tcpOptions.noDelay = true
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.includePeerToPeer = true
@@ -316,7 +329,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         parameters.serviceClass = .interactiveVideo
 
         // Try preferred port first, fall back to OS-assigned port
-        let preferredPort: NWEndpoint.Port = NWEndpoint.Port(integerLiteral: BCConstants.tcpPort)
+        let preferredPort: NWEndpoint.Port = NWEndpoint.Port(rawValue: preferredTCPPort)!
         var listener: NWListener
         do {
             listener = try NWListener(using: parameters, on: preferredPort)
@@ -411,6 +424,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                     if let self = self {
                         if !self.connectedClients.contains(where: { $0 === connection }) {
                             self.connectedClients.append(connection)
+                            self.status = "Connected"
                         }
                         if self.lastADBPort != nil && !self.wirelessADBEnabled,
                            let adb = self.lastADBPath {
@@ -597,9 +611,18 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     private func removeConnection(_ connection: NWConnection) {
         let connId = ObjectIdentifier(connection)
+        connectionFormat.removeValue(forKey: connId)
+        connection.stateUpdateHandler = nil
+        connection.cancel()
         DispatchQueue.main.async {
             self.connectedClients.removeAll(where: { $0 === connection })
-            self.connectionFormat.removeValue(forKey: connId)
+            if self.connectedClients.isEmpty {
+                self.videoRenderer?.flush()
+                self.lastDecodedFrameTime = .distantPast
+                self.staleRecoveryAttempts = 0
+                self.status = "Sender disconnected — waiting for a connection…"
+                self.networkQueue.async { self.videoDecoder?.reset() }
+            }
             // Do NOT reset wirelessADBEnabled — once enabled, it stays enabled
             // to prevent re-running adb tcpip 5555 on every reconnect
             guard !self.isStopped else { return }
@@ -721,6 +744,11 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                 return
             }
 
+            // A stalled stream is not proof of disconnection (UDP has no FIN).
+            // Hide old pixels but keep the transport available for recovery.
+            if !neverGotFrames && staleDuration > 15 {
+                self.videoRenderer?.flush()
+            }
             self.staleRecoveryAttempts += 1
 
             // Resetting the decoder is only worth doing while the keyframe we asked for
@@ -758,6 +786,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             LogManager.shared.log("Receiver: Connection recovered — stream active")
         }
         DispatchQueue.main.async {
+            guard !self.connectedClients.isEmpty else { return }
             self.videoRenderer?.enqueue(sampleBuffer)
         }
     }

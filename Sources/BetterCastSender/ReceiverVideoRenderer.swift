@@ -254,7 +254,7 @@ class ReceiverVideoRenderer: ObservableObject {
     }
 
     func flush() {
-        displayLayer.flush()
+        displayLayer.flushAndRemoveImage()
         DispatchQueue.main.async {
             self.videoSize = .zero
         }
