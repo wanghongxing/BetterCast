@@ -296,3 +296,9 @@
 "Prefer Thunderbolt Bridge" = "优先雷雳网桥";
 "Prefer Ethernet" = "优先以太网";
 "Prefer Wi-Fi" = "优先 Wi-Fi";
+
+"Mute Sender" = "发送端静音";
+"Sender Audio" = "发送端音频";
+"Mutes this Mac while streaming audio. Restores the previous mute state when stopped." = "音频串流时静音本机输出，停止后恢复原来的静音状态。";
+"No sound output device" = "未找到声音输出设备";
+"This sound output does not support software mute" = "当前声音输出设备不支持软件静音";

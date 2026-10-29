@@ -8,6 +8,10 @@ import AppKit
 /// all, and the only way back was File > New Window. Almost every Mac app reopens on
 /// that click, so doing nothing reads as the app being broken rather than as a choice.
 final class BetterCastAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        SenderAudioMute.shared.restore()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         guard !hasVisibleWindows else { return true }
 

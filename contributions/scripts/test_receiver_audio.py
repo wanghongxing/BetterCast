@@ -35,9 +35,33 @@ precondition(frames > 18000 && peak > 0.05, "AAC did not decode audible PCM")
 print("PASS: AAC 48kHz stereo decoded: \(frames) frames, peak \(peak)")
 precondition(decoder.decode(Data()) == nil)
 
+final class FakeOutput: SenderSoundOutput {
+    var device: AudioDeviceID = 1
+    var muted: [AudioDeviceID: Bool] = [1:false, 2:true]
+    var writable = true
+    func defaultDevice() -> AudioDeviceID? { device }
+    func muteState(_ id: AudioDeviceID) -> Bool? { muted[id] }
+    func setMuted(_ value: Bool, device: AudioDeviceID) -> Bool {
+        guard writable else { return false }; muted[device] = value; return true
+    }
+}
+let output = FakeOutput()
+let mute = SenderAudioMute(output:output)
+precondition(mute.update(active:true) == nil && output.muted[1] == true)
+_ = mute.update(active:false)
+precondition(output.muted[1] == false)
+_ = mute.update(active:true)
+output.device = 2
+_ = mute.update(active:true)
+precondition(output.muted[1] == false && output.muted[2] == true)
+mute.restore()
+precondition(output.muted[2] == true)
+output.device = 1; output.writable = false
+precondition(mute.update(active:true) != nil && output.muted[1] == false)
+print("PASS: mute enable/disable, device change, prior mute preservation, unsupported device")
 '''
     (folder/'main.swift').write_text(source)
     subprocess.run(['swiftc','-target','x86_64-apple-macosx10.15',
         str(root/'Sources/BetterCastSender/ReceiverAudioPlayer.swift'),
-        str(folder/'main.swift'),'-o',str(folder/'test')],check=True)
+        str(root/'Sources/BetterCastSender/SenderAudioMute.swift'),str(folder/'main.swift'),'-o',str(folder/'test')],check=True)
     subprocess.run([str(folder/'test'),str(aac)],check=True)

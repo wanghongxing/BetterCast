@@ -1482,6 +1482,15 @@ struct DetailPanelView: View {
                 }
             }
 
+            Section("Sender Audio") {
+                Toggle("Mute Sender", isOn: $client.muteSender)
+                if let message = client.senderMuteStatus {
+                    Text(tr(message)).font(.caption).foregroundStyle(.orange)
+                }
+                Text("Mutes this Mac while streaming audio. Restores the previous mute state when stopped.")
+                    .font(.caption)
+            }
+
             Section("Controls") {
                 VStack(spacing: 8) {
                     HStack(spacing: 10) {
@@ -2327,6 +2336,11 @@ struct DeviceDetailView: View {
                             : "Streams system audio to this receiver.")
                 }
 
+                Toggle("Mute Sender", isOn: $client.muteSender)
+                if let message = client.senderMuteStatus {
+                    Text(tr(message)).font(.caption).foregroundStyle(.orange)
+                }
+
                 HStack {
                     Toggle("Smooth Motion", isOn: Binding(
                         get: { display.smoothMotion },
@@ -2998,6 +3012,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     @Published var useLegacyCapture: Bool = NetworkClient.loadBool(SettingsKey.legacyCapture, default: false) {
         didSet { UserDefaults.standard.set(useLegacyCapture, forKey: SettingsKey.legacyCapture) }
     }
+    @Published var muteSender = false { didSet { synchronizeSenderMute() } }
+    @Published var senderMuteStatus: String? = nil
+
+    private func synchronizeSenderMute() {
+        let streamingAudio = pipelines.values.contains {
+            guard $0.audioEnabled && $0.supportsTypeByte && !legacyCaptureFor(serviceName: $0.service.name) else { return false }
+            if case .ready = $0.connection.state { return true }
+            return false
+        }
+        senderMuteStatus = SenderAudioMute.shared.update(active: muteSender && streamingAudio)
+    }
+
     @Published var audioStreamingEnabled: Bool = NetworkClient.loadBool(SettingsKey.audio, default: true) { // Master toggle for audio streaming
         didSet { UserDefaults.standard.set(audioStreamingEnabled, forKey: SettingsKey.audio) }
     }
@@ -3787,6 +3813,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         observeDisplayWake()
         roamingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.reconcileNetworkRoutes()
+            self?.synchronizeSenderMute()
         }
         
         // We can't monitor recursively in init easily, but we can start it.
@@ -5583,6 +5610,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connectedServices.removeAll()
         connectedDisplays.removeAll()
         status = "Disconnected"
+        synchronizeSenderMute()
         heartbeatTimer?.invalidate()
     }
 
@@ -5661,6 +5689,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 pipelines[connectionId]?.audioEncoder = encoder
             }
             pipelines[connectionId]?.screenRecorder?.audioEncoder = enabled ? pipelines[connectionId]?.audioEncoder : nil
+            synchronizeSenderMute()
             LogManager.shared.log("Sender: Audio \(enabled ? "enabled" : "disabled") for \(name)")
         }
     }
@@ -5762,6 +5791,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func updateConnectedDisplays() {
+        synchronizeSenderMute()
         connectedDisplays = pipelines.map { (id, pipeline) in
             let bounds = InputHandler.shared.getDisplayBounds(for: id)
             let res = bounds.width > 0 ? "\(Int(bounds.width))x\(Int(bounds.height))" : tr("Initializing...")
