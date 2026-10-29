@@ -3,7 +3,7 @@ import Combine
 
 // AppKit lifecycle (not SwiftUI @main App, which is macOS 11+) so this runs back to 10.15.
 // Receiver-only: wire the shared core and drop the renderer's NSView straight into a window.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private let listener = ReceiverNetworkListener()
     private let decoder = ReceiverVideoDecoder()
@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = NSWindow(contentRect: frame,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
+        window.delegate = self
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.title = "BetterCast Receiver"
         window.center()
 
@@ -25,7 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         container.layer?.backgroundColor = NSColor.black.cgColor
 
         let video = renderer.view
-        video.translatesAutoresizingMaskIntoConstraints = false
+        video.frame = container.bounds
+        video.autoresizingMask = [.width, .height]
         container.addSubview(video)
 
         statusLabel.textColor = .white
@@ -34,10 +37,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         container.addSubview(statusLabel)
 
         NSLayoutConstraint.activate([
-            video.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            video.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            video.topAnchor.constraint(equalTo: container.topAnchor),
-            video.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
@@ -60,6 +59,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         listener.setup(decoder: decoder, renderer: renderer)
         listener.start()
     }
+
+    private func synchronizeVideoLayout() {
+        guard let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        renderer.view.frame = content.bounds
+        renderer.layout()
+    }
+
+    func windowDidResize(_ notification: Notification) { synchronizeVideoLayout() }
+    func windowDidEnterFullScreen(_ notification: Notification) { synchronizeVideoLayout() }
+    func windowDidExitFullScreen(_ notification: Notification) { synchronizeVideoLayout() }
+    func windowDidChangeBackingProperties(_ notification: Notification) { synchronizeVideoLayout() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

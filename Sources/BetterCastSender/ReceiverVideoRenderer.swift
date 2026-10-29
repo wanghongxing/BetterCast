@@ -134,13 +134,21 @@ class ReceiverInputOverlayView: NSView {
         return CALayer()
     }
 
+    var onLayout: (() -> Void)?
+
     override func layout() {
         super.layout()
-        if let sublayers = layer?.sublayers {
-            for sublayer in sublayers {
-                sublayer.frame = bounds
-            }
-        }
+        onLayout?()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        onLayout?()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onLayout?()
     }
 }
 
@@ -190,12 +198,18 @@ class ReceiverVideoRenderer: ObservableObject {
         }
 
         view.layer?.addSublayer(displayLayer)
+        view.onLayout = { [weak self] in self?.layout() }
+        layout()
     }
 
     func layout() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        displayLayer.frame = view.bounds
+        // Fullscreen changes the backing layer geometry independently of video frames.
+        // Never animate the video layer's position/size along the window transition.
+        displayLayer.removeAllAnimations()
+        displayLayer.bounds = CGRect(origin: .zero, size: view.bounds.size)
+        displayLayer.position = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         CATransaction.commit()
     }
 

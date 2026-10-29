@@ -4,6 +4,20 @@ import Network
 let app = NSApplication.shared
 let listener = ReceiverNetworkListener(tcpPort: 0)
 let renderer = ReceiverVideoRenderer()
+// Simulate a centered window expanding to 1080p fullscreen and returning.
+let host = NSView(frame: NSRect(x: 320, y: 200, width: 1280, height: 720))
+renderer.view.frame = host.bounds
+renderer.view.autoresizingMask = [.width, .height]
+host.addSubview(renderer.view)
+for size in [NSSize(width: 1920, height: 1080), NSSize(width: 1280, height: 720)] {
+    host.setFrameSize(size)
+    host.layoutSubtreeIfNeeded()
+    precondition(renderer.view.frame == host.bounds)
+    guard let videoLayer = renderer.view.layer?.sublayers?.first else { fatalError("No video layer") }
+    precondition(videoLayer.frame == renderer.view.bounds, "Video shifted after resize")
+    precondition(videoLayer.animationKeys()?.isEmpty != false)
+}
+print("PASS: window/fullscreen-size geometry and no layer animation")
 listener.setup(decoder: ReceiverVideoDecoder(), renderer: renderer)
 listener.start()
 func waitUntil(_ condition: () -> Bool) {
