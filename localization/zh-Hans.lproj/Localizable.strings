@@ -292,3 +292,7 @@
 
 "Drag to arrange" = "拖动以排列";
 "The main display stays in place; drag the others around it" = "主显示器保持不动；请将其他显示器拖到它周围";
+
+"Prefer Thunderbolt Bridge" = "优先雷雳网桥";
+"Prefer Ethernet" = "优先以太网";
+"Prefer Wi-Fi" = "优先 Wi-Fi";

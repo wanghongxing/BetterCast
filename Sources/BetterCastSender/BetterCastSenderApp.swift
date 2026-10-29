@@ -1435,7 +1435,7 @@ struct DetailPanelView: View {
                         }
                     }
                     .disabled(client.isConnected)
-                    InfoTip(text: "Auto: AWDL for Apple devices, WiFi for others. P2P: forces direct link. Router: uses your WiFi network. Cable: USB/Thunderbolt only.")
+                    InfoTip(text: "Auto prefers Thunderbolt when discovered. Prefer modes try the selected network first, then fall back after 5 seconds. Reconnect to apply a changed mode. Cable restricts connections to wired networks.")
                 }
 
                 HStack {
@@ -2865,6 +2865,7 @@ struct DiscoveredService: Identifiable {
     /// fallback — which is what an Android phone used to pay on every single connect.
     /// Sticky, because AWDL is an on-demand radio and may not be up on the first browse.
     var seenOnAWDL: Bool = false
+    var networkInterfaces: [NWInterface] = []
 }
 
 enum StreamQuality: Int, CaseIterable, Identifiable {
@@ -2891,6 +2892,9 @@ enum NetworkInterfacePreference: String, CaseIterable, Identifiable {
     case p2pOnly = "Force P2P (WiFi Direct)"
     case routerOnly = "Force Router/WiFi"
     case wiredCable = "USB / Thunderbolt Cable"
+    case preferThunderbolt = "Prefer Thunderbolt Bridge"
+    case preferEthernet = "Prefer Ethernet"
+    case preferWiFi = "Prefer Wi-Fi"
 
     var id: String { self.rawValue }
 
@@ -3301,7 +3305,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         // Sticky: once seen on AWDL, stay seen. The radio sleeps.
                         let previously = self.foundServices.first(where: { $0.name == name })?.seenOnAWDL ?? false
                         return DiscoveredService(name: name, endpoint: result.endpoint,
-                                                 seenOnAWDL: onAWDL || previously)
+                                                 seenOnAWDL: onAWDL || previously,
+                                                 networkInterfaces: result.interfaces)
                     }
                     return nil
                 }
@@ -3834,7 +3839,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
         
         switch interfacePreference {
-        case .auto:
+        case .auto, .preferThunderbolt, .preferEthernet, .preferWiFi:
             // Deliberately no requiredInterfaceType. AWDL is an on-demand radio:
             // the system only powers awdl0 up while something is actively running a
             // peer-to-peer browse or listen. Pinning this to .wifi restricted the
@@ -3940,7 +3945,26 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // For Apple devices, prefer the P2P endpoint if available (AWDL low-latency)
         var connectEndpoint = service.endpoint
-        if interfacePreference == .wiredCable || interfacePreference == .routerOnly {
+        let thunderboltNames = ConnectionNetwork.thunderboltNames()
+        let preferredInterface: NWInterface?
+        switch interfacePreference {
+        case .auto, .wiredCable, .preferThunderbolt:
+            preferredInterface = service.networkInterfaces.first { thunderboltNames.contains($0.name) }
+        case .preferEthernet:
+            preferredInterface = service.networkInterfaces.first { $0.type == .wiredEthernet && !thunderboltNames.contains($0.name) }
+        case .preferWiFi:
+            preferredInterface = service.networkInterfaces.first { $0.type == .wifi && !$0.name.hasPrefix("awdl") && !$0.name.hasPrefix("llw") }
+        default:
+            preferredInterface = nil
+        }
+        if let bridge = preferredInterface {
+            parameters.requiredInterface = bridge
+            parameters.includePeerToPeer = false
+            if case .service(let name, let type, let domain, _) = service.endpoint {
+                connectEndpoint = .service(name: name, type: type, domain: domain, interface: bridge)
+            }
+            LogManager.shared.log("Sender: Preferring network interface \(bridge.name)")
+        } else if interfacePreference == .wiredCable || interfacePreference == .routerOnly {
             // Explicit Mode choice: honor it for the CONNECTION, not just discovery.
             // The Apple smart-routing below forces AWDL and even prohibits
             // .wiredEthernet, so without this branch "USB / Thunderbolt Cable" mode
@@ -4093,6 +4117,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
                     self?.receive(on: connection, connectionId: connectionId)
                 case .failed(let error):
+                    if preferredInterface != nil && !connectionTimedOut {
+                        timeoutWork.perform()
+                        return
+                    }
                     timeoutWork.cancel()
                     self?.unmarkConnecting(service.name)
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
@@ -5063,10 +5091,22 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let connection = NWConnection(to: service.endpoint, using: parameters)
         let connectionId = UUID()
 
+        let timeoutWork = DispatchWorkItem { [weak self, weak connection] in
+            guard let self = self, let connection = connection,
+                  self.pipelines[connectionId] == nil else { return }
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+            self.unmarkConnecting(service.name)
+            self.status = "Connection timed out — check the selected network or connect to the receiver's Thunderbolt IP."
+            LogManager.shared.log("Sender: Retry to \(service.name) timed out after 10 seconds; released connection attempt")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWork)
+
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
+                    timeoutWork.cancel()
                     self?.unmarkConnecting(service.name)
                     // Detect link type
                     var isP2P = false
@@ -5130,6 +5170,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
                     self?.receive(on: connection, connectionId: connectionId)
                 case .failed(let error):
+                    timeoutWork.cancel()
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
                     self?.unmarkConnecting(service.name)
                     // If the connection failed before .ready, no pipeline exists, so
@@ -5146,6 +5187,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         self?.status = "Connected to \(remaining) device(s)"
                     }
                 case .cancelled:
+                    timeoutWork.cancel()
                     self?.unmarkConnecting(service.name)
                     self?.removeConnection(connectionId)
                     connection.stateUpdateHandler = nil

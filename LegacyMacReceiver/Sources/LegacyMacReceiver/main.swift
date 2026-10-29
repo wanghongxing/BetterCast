@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let decoder = ReceiverVideoDecoder()
     private let renderer = ReceiverVideoRenderer()
     private let statusLabel = NSTextField(labelWithString: "Waiting for a Mac to connect…")
+    private let networkLabel = NSTextField(labelWithString: "Not connected")
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,7 +37,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(statusLabel)
 
+        networkLabel.textColor = .white
+        networkLabel.backgroundColor = NSColor.black.withAlphaComponent(0.65)
+        networkLabel.drawsBackground = true
+        networkLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        networkLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(networkLabel)
+
         NSLayoutConstraint.activate([
+            networkLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            networkLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            networkLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12),
             statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
@@ -54,6 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         listener.$connectedClients
             .receive(on: DispatchQueue.main)
             .sink { [weak self] clients in self?.statusLabel.isHidden = !clients.isEmpty }
+            .store(in: &cancellables)
+
+        listener.$connectionNetwork
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] network in self?.networkLabel.stringValue = network }
             .store(in: &cancellables)
 
         listener.setup(decoder: decoder, renderer: renderer)

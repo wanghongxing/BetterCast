@@ -8,6 +8,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private var udpListener: NWListener?
 
     @Published var status: String? = "Initializing..."
+    @Published var connectionNetwork: String = "Not connected"
     @Published var connectedClients: [NWConnection] = []
     @Published var manualConnectHost: String = "localhost"
     @Published var manualConnectPort: String = "51820"
@@ -85,6 +86,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             connection.cancel()
         }
         connectedClients.removeAll()
+        connectionNetwork = "Not connected"
         videoRenderer?.flush()
     }
 
@@ -415,7 +417,16 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         }
     }
 
+    private func updateConnectionNetwork() {
+        connectionNetwork = connectedClients.isEmpty ? "Not connected" : connectedClients.map {
+            ConnectionNetwork.description(for: $0)
+        }.joined(separator: " | ")
+    }
+
     private func handleNewConnection(_ connection: NWConnection, type: ConnectionType) {
+        connection.pathUpdateHandler = { [weak self] _ in
+            DispatchQueue.main.async { self?.updateConnectionNetwork() }
+        }
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
@@ -425,6 +436,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                         if !self.connectedClients.contains(where: { $0 === connection }) {
                             self.connectedClients.append(connection)
                             self.status = "Connected"
+                            self.updateConnectionNetwork()
                         }
                         if self.lastADBPort != nil && !self.wirelessADBEnabled,
                            let adb = self.lastADBPath {
@@ -612,10 +624,12 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private func removeConnection(_ connection: NWConnection) {
         let connId = ObjectIdentifier(connection)
         connectionFormat.removeValue(forKey: connId)
+        connection.pathUpdateHandler = nil
         connection.stateUpdateHandler = nil
         connection.cancel()
         DispatchQueue.main.async {
             self.connectedClients.removeAll(where: { $0 === connection })
+            self.updateConnectionNetwork()
             if self.connectedClients.isEmpty {
                 self.videoRenderer?.flush()
                 self.lastDecodedFrameTime = .distantPast
@@ -748,6 +762,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             // Hide old pixels but keep the transport available for recovery.
             if !neverGotFrames && staleDuration > 15 {
                 self.videoRenderer?.flush()
+                self.connectionNetwork = "Video paused — " + self.connectedClients.map {
+                    ConnectionNetwork.description(for: $0)
+                }.joined(separator: " | ")
             }
             self.staleRecoveryAttempts += 1
 
@@ -787,6 +804,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         }
         DispatchQueue.main.async {
             guard !self.connectedClients.isEmpty else { return }
+            if self.connectionNetwork.hasPrefix("Video paused") { self.updateConnectionNetwork() }
             self.videoRenderer?.enqueue(sampleBuffer)
         }
     }
