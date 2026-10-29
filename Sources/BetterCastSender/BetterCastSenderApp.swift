@@ -2906,7 +2906,7 @@ enum NetworkInterfacePreference: String, CaseIterable, Identifiable {
 // Per-connection pipeline: each device gets its own virtual display, screen capture, and encoder
 struct ConnectionPipeline {
     let id: UUID
-    let connection: NWConnection
+    var connection: NWConnection
     // var, not let: an invite pipeline is created before the device tells us its
     // name, so handleDeviceHello renames it in place rather than reconnecting.
     var service: DiscoveredService
@@ -3328,7 +3328,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 // Auto-connect to newly discovered services
                 if self.autoConnect {
                     for service in services {
-                        if !self.connectedServices.contains(where: { $0.name == service.name })
+                        if !self.manuallyDisconnectedNames.contains(service.name)
+                            && !self.dismissedServiceNames.contains(service.name)
+                            && !service.networkInterfaces.contains(where: { $0.type == .loopback })
+                            && !self.connectedServices.contains(where: { $0.name == service.name })
                             && !self.connectingServiceNames.contains(service.name) {
                             // Skip ADB synthetic entries
                             if service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)") { continue }
@@ -3781,6 +3784,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         LogManager.shared.log("Sender: App Starting")
         observeScreenArrangement()
         observeDisplayWake()
+        roamingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.reconcileNetworkRoutes()
+        }
         
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
@@ -3894,6 +3900,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
     
     func connect(to service: DiscoveredService) {
+        manuallyDisconnectedNames.remove(service.name)
         // Check if already connected or currently connecting to this service
         if connectedServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
@@ -4046,6 +4053,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                if let active = self?.pipelines[connectionId], active.connection !== connection { return }
                 switch state {
                 case .ready:
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
@@ -4093,6 +4101,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
                     self?.pipelines[connectionId] = pipeline
+                    self?.observeRouteViability(connection, id: connectionId)
                     self?.connectedServices.append(service)
                     self?.updateConnectedDisplays()
 
@@ -4106,7 +4115,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     // The re-dial landed, so the invite connection it replaces can go now.
                     if let old = self?.supersededByRedial.removeValue(forKey: service.name) {
                         LogManager.shared.log("Sender: Re-dial to \(service.name) is up — retiring the invite connection it replaced")
-                        self?.removeConnection(old)
+                        self?.removeConnection(old, intentional: true)
                     }
 
                     // Start shared services on first connection
@@ -4274,7 +4283,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         if let syntheticName,
            let entry = pipelines.first(where: { $0.value.service.name == syntheticName }) {
-            removeConnection(entry.key)
+            removeConnection(entry.key, intentional: true)
         }
         foundServices.removeAll { $0.name == syntheticName }
         disconnectUSB()
@@ -4718,7 +4727,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
                     for name in adbNames {
                         if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
-                            self.removeConnection(entry.key)
+                            self.removeConnection(entry.key, intentional: true)
                             LogManager.shared.log("ADB Wireless: Disconnected existing '\(name)'")
                         }
                     }
@@ -4780,7 +4789,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
                 for name in adbNames {
                     if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
-                        self.removeConnection(entry.key)
+                        self.removeConnection(entry.key, intentional: true)
                         LogManager.shared.log("ADB Wireless: Disconnected existing '\(name)' before switching")
                     }
                 }
@@ -4859,6 +4868,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     /// packets — which is what happens when Wi-Fi is switched off — so these ghosts
     /// can linger for an hour and cannot be told apart from a live device by name.
     private var dismissedServiceNames: Set<String> = []
+    private var manuallyDisconnectedNames: Set<String> = []
 
     /// Forget a device row. Disconnects first when it is live, otherwise the row
     /// would disappear while its stream kept running in the background.
@@ -5104,6 +5114,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                if let active = self?.pipelines[connectionId], active.connection !== connection { return }
                 switch state {
                 case .ready:
                     timeoutWork.cancel()
@@ -5147,6 +5158,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
                     self?.pipelines[connectionId] = pipeline
+                    self?.observeRouteViability(connection, id: connectionId)
                     self?.connectedServices.append(service)
                     self?.updateConnectedDisplays()
 
@@ -5160,7 +5172,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     // replaces stays up until the fallback is actually streaming.
                     if let old = self?.supersededByRedial.removeValue(forKey: service.name) {
                         LogManager.shared.log("Sender: Re-dial to \(service.name) is up — retiring the invite connection it replaced")
-                        self?.removeConnection(old)
+                        self?.removeConnection(old, intentional: true)
                     }
 
                     if count == 1 {
@@ -5367,8 +5379,166 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
     
-    func removeConnection(_ connectionId: UUID) {
+    // Keep capture, encoder and virtual display alive while replacing only the TCP socket.
+    private var roamingTimer: Timer?
+    private var recoveringRoutes = Set<UUID>()
+    private var routeAttempts: [UUID: NWConnection] = [:]
+    private var routeRetryAfter: [UUID: Date] = [:]
+    private var failedRoutes: [UUID: [String: Date]] = [:]
+    private var stableRoutes: [UUID: (name: String, since: Date)] = [:]
+
+    private func observeRouteViability(_ connection: NWConnection, id: UUID) {
+        connection.viabilityUpdateHandler = { [weak self, weak connection] viable in
+            guard !viable, let self = self, let connection = connection,
+                  self.pipelines[id]?.connection === connection else { return }
+            self.removeConnection(id)
+        }
+    }
+
+    private func canRecoverRoute(_ pipeline: ConnectionPipeline) -> Bool {
+        guard connectionType != "UDP", !pipeline.isLoopback,
+              !manuallyDisconnectedNames.contains(pipeline.service.name),
+              !dismissedServiceNames.contains(pipeline.service.name),
+              case .service = pipeline.service.endpoint else { return false }
+        return true
+    }
+
+    private func routeRank(_ interface: NWInterface) -> Int {
+        let thunderbolt = ConnectionNetwork.thunderboltNames().contains(interface.name)
+        let peer = interface.name.hasPrefix("awdl") || interface.name.hasPrefix("llw")
+        switch interfacePreference {
+        case .p2pOnly: return peer ? 0 : 100
+        case .wiredCable: return thunderbolt ? 0 : (interface.type == .wiredEthernet ? 1 : 100)
+        case .preferEthernet:
+            if interface.type == .wiredEthernet && !thunderbolt { return 0 }
+            return thunderbolt ? 1 : (peer ? 3 : 2)
+        case .preferWiFi, .routerOnly:
+            if interface.type == .wifi && !peer { return 0 }
+            return thunderbolt ? 1 : (peer ? 3 : 2)
+        default:
+            return thunderbolt ? 0 : (interface.type == .wiredEthernet ? 1 : (peer ? 3 : 2))
+        }
+    }
+
+    private func reconcileNetworkRoutes() {
+        let now = Date()
+        for (id, pipeline) in pipelines {
+            guard canRecoverRoute(pipeline), routeAttempts[id] == nil,
+                  now >= (routeRetryAfter[id] ?? .distantPast) else { continue }
+            guard let service = foundServices.first(where: { $0.name == pipeline.service.name }),
+                  case .service(let name, let type, let domain, _) = service.endpoint else { continue }
+            let routes = service.networkInterfaces.filter {
+                $0.type != .loopback && routeRank($0) < 100 &&
+                    now >= (failedRoutes[id]?[$0.name] ?? .distantPast)
+            }.sorted { routeRank($0) == routeRank($1) ? $0.name < $1.name : routeRank($0) < routeRank($1) }
+            guard let best = routes.first else { continue }
+            let recovering = recoveringRoutes.contains(id)
+            let currentRank = pipeline.connection.currentPath?.availableInterfaces.map { routeRank($0) }.min() ?? 100
+            if !recovering {
+                guard routeRank(best) < currentRank else { stableRoutes[id] = nil; continue }
+                if stableRoutes[id]?.name != best.name {
+                    stableRoutes[id] = (best.name, now)
+                    continue
+                }
+                guard now.timeIntervalSince(stableRoutes[id]!.since) >= 4 else { continue }
+            }
+            let options = NWProtocolTCP.Options()
+            options.noDelay = true
+            options.enableKeepalive = true
+            options.keepaliveIdle = 5
+            options.keepaliveInterval = 2
+            options.keepaliveCount = 3
+            let parameters = NWParameters(tls: nil, tcp: options)
+            parameters.requiredInterface = best
+            parameters.includePeerToPeer = best.name.hasPrefix("awdl") || best.name.hasPrefix("llw")
+            parameters.serviceClass = .interactiveVideo
+            let candidate = NWConnection(to: .service(name: name, type: type, domain: domain, interface: best), using: parameters)
+            routeAttempts[id] = candidate
+            LogManager.shared.log("Sender: \(recovering ? "Recovering" : "Upgrading") \(name) via \(best.name)")
+            let fail: () -> Void = { [weak self, weak candidate] in
+                guard let self = self, let candidate = candidate, self.routeAttempts[id] === candidate else { return }
+                candidate.stateUpdateHandler = nil
+                candidate.cancel()
+                self.routeAttempts[id] = nil
+                self.failedRoutes[id, default: [:]][best.name] = Date().addingTimeInterval(20)
+                self.routeRetryAfter[id] = Date().addingTimeInterval(2)
+                self.stableRoutes[id] = nil
+                LogManager.shared.log("Sender: Route attempt failed on \(best.name); will try another available route")
+            }
+            candidate.stateUpdateHandler = { [weak self, weak candidate] state in
+                guard let self = self, let candidate = candidate,
+                      self.routeAttempts[id] === candidate else { return }
+                switch state {
+                case .ready:
+                    guard var live = self.pipelines[id], self.canRecoverRoute(live) else { fail(); return }
+                    let old = live.connection
+                    old.stateUpdateHandler = nil
+                    old.viabilityUpdateHandler = nil
+                    old.cancel()
+                    live.connection = candidate
+                    live.service = service
+                    live.lastHeartbeat = Date()
+                    live.pendingSends = 0
+                    live.sendInProgress = false
+                    live.isP2P = best.name.hasPrefix("awdl") || best.name.hasPrefix("llw")
+                    self.pipelines[id] = live
+                    self.observeRouteViability(candidate, id: id)
+                    self.routeAttempts[id] = nil
+                    self.recoveringRoutes.remove(id)
+                    self.stableRoutes[id] = nil
+                    self.routeRetryAfter[id] = Date().addingTimeInterval(10)
+                    candidate.stateUpdateHandler = { [weak self, weak candidate] state in
+                        guard let self = self, let candidate = candidate,
+                              self.pipelines[id]?.connection === candidate else { return }
+                        switch state {
+                        case .failed, .cancelled: self.removeConnection(id)
+                        default: break
+                        }
+                    }
+                    self.receive(on: candidate, connectionId: id)
+                    live.videoEncoder?.forceKeyframe()
+                    self.status = "Connected: " + ConnectionNetwork.description(for: candidate)
+                    self.updateConnectedDisplays()
+                    LogManager.shared.log("Sender: Network switched, virtual display preserved: \(ConnectionNetwork.description(for: candidate))")
+                case .failed, .cancelled: fail()
+                default: break
+                }
+            }
+            candidate.start(queue: .main)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: fail)
+        }
+    }
+
+    private func cancelRouteRecovery(_ id: UUID) {
+        routeAttempts[id]?.stateUpdateHandler = nil
+        routeAttempts[id]?.cancel()
+        routeAttempts[id] = nil
+        recoveringRoutes.remove(id)
+        routeRetryAfter[id] = nil
+        failedRoutes[id] = nil
+        stableRoutes[id] = nil
+    }
+
+    func removeConnection(_ connectionId: UUID, intentional: Bool = false) {
+
         guard let pipeline = pipelines[connectionId] else { return }
+
+        if !intentional && canRecoverRoute(pipeline) {
+            guard recoveringRoutes.insert(connectionId).inserted else { return }
+            routeRetryAfter[connectionId] = nil
+            stableRoutes[connectionId] = nil
+            let previousInterfaces = pipeline.connection.currentPath?.availableInterfaces ?? []
+            for interface in previousInterfaces {
+                failedRoutes[connectionId, default: [:]][interface.name] = Date().addingTimeInterval(12)
+            }
+            pipeline.connection.stateUpdateHandler = nil
+            pipeline.connection.viabilityUpdateHandler = nil
+            pipeline.connection.cancel()
+            status = "Connection lost — reconnecting to " + pipeline.service.name
+            reconcileNetworkRoutes()
+            return
+        }
+        cancelRouteRecovery(connectionId)
 
         // Tear down this connection's pipeline
         pipeline.screenRecorder?.stopCapture()
@@ -5379,6 +5549,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // queues/buffers) never deallocates after cancel. This was leaking one
         // NWConnection graph per disconnect.
         pipeline.connection.stateUpdateHandler = nil
+        pipeline.connection.viabilityUpdateHandler = nil
         InputHandler.shared.removeDisplayBounds(for: connectionId)
 
         pipelines.removeValue(forKey: connectionId)
@@ -5397,11 +5568,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func disconnect() {
+        manuallyDisconnectedNames.formUnion(pipelines.values.map { $0.service.name })
+        for id in Array(pipelines.keys) { cancelRouteRecovery(id) }
         for (id, pipeline) in pipelines {
             pipeline.screenRecorder?.stopCapture()
             pipeline.virtualDisplayManager?.destroyDisplay()
             pipeline.connection.cancel()
             pipeline.connection.stateUpdateHandler = nil // Break self-retain cycle (see removeConnection)
+            pipeline.connection.viabilityUpdateHandler = nil
             InputHandler.shared.removeDisplayBounds(for: id)
         }
         pipelines.removeAll()
@@ -5412,13 +5586,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func disconnectService(_ service: DiscoveredService) {
+        manuallyDisconnectedNames.insert(service.name)
         if let entry = pipelines.first(where: { $0.value.service.name == service.name }) {
-            removeConnection(entry.key)
+            removeConnection(entry.key, intentional: true)
         }
     }
 
     func disconnectConnection(_ connectionId: UUID) {
-        removeConnection(connectionId)
+        if let name = pipelines[connectionId]?.service.name { manuallyDisconnectedNames.insert(name) }
+        removeConnection(connectionId, intentional: true)
     }
 
     /// Switch an already-connected Android device to the ADB USB tunnel (lower latency, higher
@@ -5426,7 +5602,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     /// in via USB — connectADBUSB() reports "No USB device" if it isn't.
     func switchAndroidToUSB(from connectionId: UUID) {
         LogManager.shared.log("Sender: Switching Android connection to USB…")
-        removeConnection(connectionId)
+        removeConnection(connectionId, intentional: true)
         // Let teardown settle before adb forward + reconnect.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.connectADBUSB()
@@ -5457,7 +5633,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             return
         }
         LogManager.shared.log("Sender: Switching Android connection to direct Wi-Fi (TCP) via '\(target.name)'…")
-        removeConnection(connectionId)
+        removeConnection(connectionId, intentional: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.connect(to: target)
         }
@@ -5817,9 +5993,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     
     private func receiveTCP(on connection: NWConnection, connectionId: UUID) {
         // Don't schedule receives on dead connections
-        guard pipelines[connectionId] != nil else { return }
+        guard pipelines[connectionId]?.connection === connection else { return }
 
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] content, contentContext, isComplete, error in
+            guard self?.pipelines[connectionId]?.connection === connection else { return }
+            if isComplete && (content == nil || content!.isEmpty) {
+                self?.removeConnection(connectionId)
+                return
+            }
             if let error = error {
                 // Fatal errors: connection is truly dead
                 if case let NWError.posix(code) = error,
@@ -5829,7 +6010,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     // For a real peer drop, tear down now so capture/encoders stop
                     // immediately instead of waiting on (or missing) the 15s reaper.
                     if code != .ECANCELED {
-                        DispatchQueue.main.async { self?.removeConnection(connectionId) }
+                        DispatchQueue.main.async {
+                            guard self?.pipelines[connectionId]?.connection === connection else { return }
+                            self?.removeConnection(connectionId)
+                        }
                     }
                     return
                 }
@@ -5845,6 +6029,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, isComplete, error in
                     // All pipelines access must happen on main thread to avoid dictionary races
                     DispatchQueue.main.async {
+                        guard self?.pipelines[connectionId]?.connection === connection else { return }
                         // Update heartbeat
                         self?.pipelines[connectionId]?.lastHeartbeat = Date()
 
@@ -6415,7 +6600,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var encodedFrameCount: Int = 0
 
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool) {
-        guard let pipeline = pipelines[connectionId] else { return }
+        guard let pipeline = pipelines[connectionId], case .ready = pipeline.connection.state else { return }
 
         encodedFrameCount += 1
         encoder.statsFrames += 1
@@ -6555,6 +6740,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 encoder.sendStarted()
                 let nowNs = DispatchTime.now().uptimeNanoseconds
                 DispatchQueue.main.async { [weak self] in
+                    guard self?.pipelines[connectionId]?.connection === pipeline.connection else { return }
                     self?.pipelines[connectionId]?.pendingSends += 1
                     self?.pipelines[connectionId]?.sendInProgress = true
                     self?.pipelines[connectionId]?.lastSendTimeNs = nowNs
@@ -6565,7 +6751,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 if isInfra {
                     encoder.sendFinished()
                     DispatchQueue.main.async { [weak self] in
-                        guard let self = self, var p = self.pipelines[connectionId] else { return }
+                        guard let self = self, var p = self.pipelines[connectionId], p.connection === pipeline.connection else { return }
                         p.pendingSends = max(0, p.pendingSends - 1)
                         p.sendInProgress = p.pendingSends > 0
                         self.pipelines[connectionId] = p
@@ -6580,7 +6766,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     // AudioEncoderDelegate - Send AAC audio to the specific connection
     func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID) {
-        guard let pipeline = pipelines[connectionId] else { return }
+        guard let pipeline = pipelines[connectionId], case .ready = pipeline.connection.state else { return }
 
         // Legacy receivers (iOS/Mac Swift) don't support audio — skip
         guard pipeline.supportsTypeByte else { return }
