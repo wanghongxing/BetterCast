@@ -1,6 +1,19 @@
 import AppKit
 import Combine
 
+/// Track the video area so the pointer is usable in the title bar and on other screens.
+final class ReceiverContainerView: NSView {
+    var onPointerPresenceChange: ((Bool) -> Void)?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: .zero,
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited], owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { onPointerPresenceChange?(true) }
+    override func mouseExited(with event: NSEvent) { onPointerPresenceChange?(false) }
+}
+
 // AppKit lifecycle (not SwiftUI @main App, which is macOS 11+) so this runs back to 10.15.
 // Receiver-only: wire the shared core and drop the renderer's NSView straight into a window.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -9,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let decoder = ReceiverVideoDecoder()
     private let renderer = ReceiverVideoRenderer()
     private let statusLabel = NSTextField(labelWithString: "Waiting for a Mac to connect…")
-    private let networkLabel = NSTextField(labelWithString: "Not connected")
+    private var localCursorHidden = false
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -23,7 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.center()
 
         // Container hosts the video NSView (fills) + a centered status label on top.
-        let container = NSView(frame: frame)
+        let container = ReceiverContainerView(frame: frame)
+        container.onPointerPresenceChange = { [weak self] inside in
+            if inside { self?.synchronizeLocalCursor() } else { self?.setLocalCursorHidden(false) }
+        }
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.cgColor
 
@@ -37,17 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(statusLabel)
 
-        networkLabel.textColor = .white
-        networkLabel.backgroundColor = NSColor.black.withAlphaComponent(0.65)
-        networkLabel.drawsBackground = true
-        networkLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        networkLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(networkLabel)
-
         NSLayoutConstraint.activate([
-            networkLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            networkLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-            networkLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12),
             statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
@@ -69,7 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         listener.$connectionNetwork
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] network in self?.networkLabel.stringValue = network }
+            .sink { [weak self] network in
+                self?.window.title = "BetterCast Receiver — " + network
+            }
             .store(in: &cancellables)
 
         listener.setup(decoder: decoder, renderer: renderer)
@@ -83,9 +91,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         renderer.layout()
     }
 
-    func windowDidResize(_ notification: Notification) { synchronizeVideoLayout() }
-    func windowDidEnterFullScreen(_ notification: Notification) { synchronizeVideoLayout() }
-    func windowDidExitFullScreen(_ notification: Notification) { synchronizeVideoLayout() }
+    private func setLocalCursorHidden(_ hidden: Bool) {
+        guard hidden != localCursorHidden else { return }
+        localCursorHidden = hidden
+        if hidden { NSCursor.hide() } else { NSCursor.unhide() }
+    }
+
+    private func synchronizeLocalCursor() {
+        guard let window = window, let content = window.contentView else {
+            setLocalCursorHidden(false)
+            return
+        }
+        let point = content.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        setLocalCursorHidden(window.styleMask.contains(.fullScreen) && NSApp.isActive &&
+            window.isKeyWindow && content.bounds.contains(point))
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        synchronizeVideoLayout()
+        synchronizeLocalCursor()
+    }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        synchronizeVideoLayout()
+        synchronizeLocalCursor()
+    }
+    func windowWillExitFullScreen(_ notification: Notification) { setLocalCursorHidden(false) }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        synchronizeVideoLayout()
+        setLocalCursorHidden(false)
+    }
+    func windowDidBecomeKey(_ notification: Notification) { synchronizeLocalCursor() }
+    func windowDidResignKey(_ notification: Notification) { setLocalCursorHidden(false) }
+    func windowWillClose(_ notification: Notification) { setLocalCursorHidden(false) }
+    func applicationDidBecomeActive(_ notification: Notification) { synchronizeLocalCursor() }
+    func applicationDidResignActive(_ notification: Notification) { setLocalCursorHidden(false) }
+    func applicationWillTerminate(_ notification: Notification) { setLocalCursorHidden(false) }
     func windowDidChangeBackingProperties(_ notification: Notification) { synchronizeVideoLayout() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
