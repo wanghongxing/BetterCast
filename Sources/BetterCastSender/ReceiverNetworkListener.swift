@@ -15,6 +15,8 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     private let networkQueue = DispatchQueue(label: "com.bettercast.receiver-network", qos: .userInteractive)
 
+    private let audioPlayer = ReceiverAudioPlayer()
+
     var videoRenderer: ReceiverVideoRenderer?
     var videoDecoder: ReceiverVideoDecoder?
     var adbInputInjector: ADBInputInjector?
@@ -67,6 +69,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     func stop() {
         isStopped = true
+        audioPlayer.stop()
         isReconnecting = false
         reconnectAttempts = 0
         heartbeatTimer?.invalidate()
@@ -535,7 +538,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             if typeByte == 0x01 && !payload.isEmpty {
                 videoDecoder?.decode(data: payload)
             } else if typeByte == 0x02 {
-                // TODO: route to audio decoder
+                audioPlayer.decode(payload)
             }
         } else {
             videoDecoder?.decode(data: body)
@@ -631,6 +634,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             self.connectedClients.removeAll(where: { $0 === connection })
             self.updateConnectionNetwork()
             if self.connectedClients.isEmpty {
+                self.audioPlayer.stop()
                 self.videoRenderer?.flush()
                 self.lastDecodedFrameTime = .distantPast
                 self.staleRecoveryAttempts = 0

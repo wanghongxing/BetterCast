@@ -2944,6 +2944,7 @@ struct ConnectionPipeline {
     // Adaptive bitrate state lives on the VideoEncoder (a class), not here — see VideoEncoder.
     // iOS/Mac Swift receivers don't strip the type byte — send raw payloads for them
     var supportsTypeByte: Bool = true
+    var audioEnabled: Bool = false
     // Receiver-reported screen dimensions (pixels) — used to match aspect ratio
     var reportedScreenWidth: Int? = nil
     var reportedScreenHeight: Int? = nil
@@ -5653,6 +5654,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             connectedDisplays[idx].audioEnabled = enabled
             let name = connectedDisplays[idx].name
             audioOverrides[screenSizeKey(name)] = enabled
+            pipelines[connectionId]?.audioEnabled = enabled
+            if enabled, pipelines[connectionId]?.audioEncoder == nil {
+                let encoder = AudioEncoder(connectionId: connectionId)
+                encoder.delegate = self
+                pipelines[connectionId]?.audioEncoder = encoder
+            }
+            pipelines[connectionId]?.screenRecorder?.audioEncoder = enabled ? pipelines[connectionId]?.audioEncoder : nil
             LogManager.shared.log("Sender: Audio \(enabled ? "enabled" : "disabled") for \(name)")
         }
     }
@@ -6552,6 +6560,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Audio encoder (if audio streaming enabled for this connection)
         let audioEnabled = connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
             ?? savedAudioEnabled(for: serviceName)
+        pipelines[connectionId]?.audioEnabled = audioEnabled
         var audioEnc: AudioEncoder? = nil
         if audioEnabled {
             let ae = AudioEncoder(connectionId: connectionId)
@@ -6571,7 +6580,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let legacyForThisDevice = legacyCaptureFor(serviceName: serviceName)
         recorder.useLegacyCapture = legacyForThisDevice
         // Legacy capture (CGDisplayStream) doesn't support audio — disable it.
-        recorder.captureAudio = audioEnabled && !legacyForThisDevice
+        // Keep capture configured for audio so the per-device switch works live.
+        // With audio disabled no encoder is attached and no packets are sent.
+        recorder.captureAudio = !legacyForThisDevice
         if audioEnabled && legacyForThisDevice {
             // This used to happen silently, right after "Audio encoder created", which
             // made it look like audio was working when nothing was ever captured.
@@ -6769,7 +6780,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         guard let pipeline = pipelines[connectionId], case .ready = pipeline.connection.state else { return }
 
         // Legacy receivers (iOS/Mac Swift) don't support audio — skip
-        guard pipeline.supportsTypeByte else { return }
+        guard pipeline.supportsTypeByte, pipeline.audioEnabled else { return }
 
         // Audio always uses TCP framing
         // Format: [4-byte length][1-byte type: 0x02=audio][AAC data]

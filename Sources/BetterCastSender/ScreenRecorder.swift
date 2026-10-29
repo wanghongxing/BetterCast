@@ -98,6 +98,8 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             // SCK still has 3 free buffers in flight, so effective latency is unchanged.
             config.queueDepth = captureFPS > 60 ? 8 : 4
             config.capturesAudio = captureAudio
+            config.sampleRate = 48000
+            config.channelCount = 2
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
